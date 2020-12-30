@@ -1,6 +1,12 @@
 <?php
 
 namespace mHttp;
+use Countable;
+use CurlHandle;
+use CurlMultiHandle;
+use CurlShareHandle;
+use JetBrains\PhpStorm\Pure;
+use SplObjectStorage;
 use SplPriorityQueue;
 
 /**
@@ -9,7 +15,7 @@ use SplPriorityQueue;
  * 支持并发连接，默认使用 share handle，这样同一个client下的所有handle共享相同的cookie等信息
  *
  */
-Class Client implements \Countable
+Class Client implements Countable
 {
 	/**
 	 * 默认代理配置
@@ -116,14 +122,14 @@ Class Client implements \Countable
 
 	/**
 	 * 存放curl multi handle
-	 * @var \CurlMultiHandle|false|resource
+	 * @var CurlMultiHandle
 	 */
-	private $handle;
+	private CurlMultiHandle $handle;
 	/**
 	 * 存放curl share handle
-	 * @var \CurlShareHandle|resource
+	 * @var CurlShareHandle
 	 */
-	private $share_handle;
+	private CurlShareHandle $share_handle;
 
 	/**
 	 * 优先队列。保存所有待跑的请求
@@ -133,9 +139,10 @@ Class Client implements \Countable
 
 	/**
 	 * 记录在跑请求。
-	 * @var array
+	 * PHP 8 开始curl handle变成了Object
+	 * @var SplObjectStorage
 	 */
-	private array $running = [];
+	private SplObjectStorage $running;
 
 	/**
 	 * 初始化
@@ -148,6 +155,7 @@ Class Client implements \Countable
 		$this->share_handle = curl_share_init();
 		curl_share_setopt($this->share_handle, CURLSHOPT_SHARE, CURL_LOCK_DATA_COOKIE);
 		$this->queue = new SplPriorityQueue();
+		$this->running = new SplObjectStorage();
 		$config and $this->setConfig($config);
 		$options and $this->setOptions($options);
 	}
@@ -224,11 +232,9 @@ Class Client implements \Countable
 			$request['curl_options'] = $options;
 			curl_setopt($curl_handle, CURLOPT_SHARE, $share_handle);
 			curl_multi_add_handle($this->handle, $curl_handle);
-			$ch_hash = (string) $curl_handle;
-			//echo $ch_hash, ' ', $request->getUrl(), ' ';
 			$request['curl_handle'] = $curl_handle;
 			$request->setClient($this);
-			$this->running[$ch_hash] = $request;
+			$this->running[$curl_handle] = $request;
 		}
 	}
 
@@ -238,7 +244,7 @@ Class Client implements \Countable
 	 * @param Request $request
 	 * @return bool|string
 	 */
-	public function sendSyncRequest(Request $request)
+	public function sendSyncRequest(Request $request): bool|string
 	{
 		$share_handle = $this->share_handle;
 		$curl_handle = curl_init();
@@ -251,18 +257,22 @@ Class Client implements \Countable
 
 	/**
 	 * 某个请求运行结束了之后拿掉。
-	 * @param resource $curl_handle
+	 * @param CurlHandle $curl_handle
 	 */
-	private function remove($curl_handle)
+	private function remove(CurlHandle $curl_handle)
 	{
-		unset($this->running[(string) $curl_handle]);
+		unset($this->running[$curl_handle]);
 		curl_multi_remove_handle($this->handle, $curl_handle);
 		curl_close($curl_handle);
 	}
 
 
-	//Build individual cURL options for a request ？？？
-	private function buildOptions(Request $request): array
+	/**
+	 * Build individual cURL options for a request
+	 * @param Request $request
+	 * @return array
+	 */
+	#[Pure] private function buildOptions(Request $request): array
 	{
 		$options = ($request->getOptions() ?? []) + $this->getOptions();
 		$url = $request->getUrl();
@@ -301,17 +311,16 @@ Class Client implements \Countable
 	}
 
 	/**
-	 * @param resource $ch curl handle
+	 * @param CurlHandle $ch curl handle
 	 * @param int $result
 	 */
-	private function processCompleted($ch, int $result)
+	private function processCompleted(CurlHandle $ch, int $result)
 	{
 		$request_info = curl_getinfo($ch);
 		$request_info['curle'] = $result;
 		$request_info['curle_msg'] = self::CURLE_MSG[$result];
 
-		$hash = (string)$ch;
-		$request = $this->running[$hash];
+		$request = $this->running[$ch];
 
 		if(curl_errno($ch) !== 0 || intval($request_info['http_code']) !== 200){ // if server responded with http error
 			$response = false;
@@ -388,7 +397,7 @@ Class Client implements \Countable
 	/**
 	 * @return int
 	 */
-	public function count():int
+	#[Pure] public function count():int
 	{
 		return count($this->queue);
 	}
